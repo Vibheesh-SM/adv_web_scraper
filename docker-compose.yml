@@ -1,0 +1,92 @@
+version: '3.8'
+
+services:
+  redis:
+    image: redis:alpine
+    container_name: threat_intel_redis
+    ports:
+      - "6379:6379"
+    restart: unless-stopped
+
+  dashboard:
+    build:
+      context: .
+      dockerfile: dashboard/Dockerfile
+    container_name: threat_intel_dashboard
+    ports:
+      - "8501:8501"
+    volumes:
+      - .:/app
+    environment:
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - YOUTUBE_API_KEY=${YOUTUBE_API_KEY}
+      - TARGET_KEYWORDS=${TARGET_KEYWORDS}
+      - NITTER_INSTANCE=${NITTER_INSTANCE}
+      - SLACK_WEBHOOK_URL=${SLACK_WEBHOOK_URL}
+      - DISCORD_WEBHOOK_URL=${DISCORD_WEBHOOK_URL}
+      - LOG_LEVEL=INFO
+      - USE_AI_CLASSIFIER=${USE_AI_CLASSIFIER}
+      - ALLOW_MOCK_DATA=${ALLOW_MOCK_DATA}
+      - TELEGRAM_CHANNELS=${TELEGRAM_CHANNELS}
+      - MAX_POST_AGE_DAYS=${MAX_POST_AGE_DAYS}
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 1G
+        reservations:
+          memory: 256M
+    restart: unless-stopped
+    depends_on:
+      - redis
+
+  celery_worker:
+    build:
+      context: .
+      dockerfile: dashboard/Dockerfile
+    container_name: threat_intel_worker
+    command: celery -A pipeline.celery_app worker --loglevel=info --concurrency=1
+    volumes:
+      - .:/app
+    environment:
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - YOUTUBE_API_KEY=${YOUTUBE_API_KEY}
+      - TARGET_KEYWORDS=${TARGET_KEYWORDS}
+      - NITTER_INSTANCE=${NITTER_INSTANCE}
+      - SLACK_WEBHOOK_URL=${SLACK_WEBHOOK_URL}
+      - DISCORD_WEBHOOK_URL=${DISCORD_WEBHOOK_URL}
+      - LOG_LEVEL=INFO
+      - USE_AI_CLASSIFIER=${USE_AI_CLASSIFIER}
+      - ALLOW_MOCK_DATA=${ALLOW_MOCK_DATA}
+      - TELEGRAM_CHANNELS=${TELEGRAM_CHANNELS}
+      - MAX_POST_AGE_DAYS=${MAX_POST_AGE_DAYS}
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 1G
+    restart: unless-stopped
+    depends_on:
+      - redis
+
+  celery_beat:
+    build:
+      context: .
+      dockerfile: dashboard/Dockerfile
+    container_name: threat_intel_beat
+    command: celery -A pipeline.celery_app beat --loglevel=info
+    volumes:
+      - .:/app
+    environment:
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512M
+    restart: unless-stopped
+    depends_on:
+      - redis
