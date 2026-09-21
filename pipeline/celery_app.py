@@ -110,8 +110,19 @@ def run_background_ingestion():
     new_records = 0
     flagged_records = 0
     
+    max_age_days = int(os.getenv("MAX_POST_AGE_DAYS", "3"))
+    cutoff_date = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=max_age_days)
+    
     try:
         for rp in raw_posts:
+            # Filter out posts older than the sliding window
+            pub_at = rp.published_at
+            if pub_at is not None:
+                if pub_at.tzinfo is None:
+                    pub_at = pub_at.replace(tzinfo=datetime.timezone.utc)
+                if pub_at < cutoff_date:
+                    continue
+
             # Verify political relevance (ignore unrelated noise/false matches)
             should_c, _ = should_process_post(rp)
             if not should_c:
@@ -149,8 +160,8 @@ def run_background_ingestion():
                     
         session.commit()
         
-        # Purge records older than 7 days
-        purge_expired_records(retention_days=7)
+        # Purge records older than max_age_days
+        purge_expired_records(retention_days=max_age_days)
         print(f"[Celery Worker] Ingestion task completed. Saved {new_records} new records ({flagged_records} flagged).")
         
     except Exception as e:

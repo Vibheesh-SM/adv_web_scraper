@@ -54,8 +54,12 @@ from collectors.instagram import fetch_instagram_threats
 from pipeline.classify import classify_and_score
 from pipeline.pre_filter import should_process_post
 from alerts.alerts import dispatch_alert
-
-from alerts.alerts import dispatch_alert
+from pipeline.single_video_report import (
+    compute_single_video_metrics,
+    generate_single_video_ai_summary,
+    generate_single_video_action_steps,
+    generate_single_video_markdown_report
+)
 
 import urllib.parse
 
@@ -65,105 +69,10 @@ init_db()
 # Set page config
 st.set_page_config(
     page_title="NTK Party Social Media Threat Monitor",
-    page_icon=None,
+    page_icon="🛡️",
     layout="wide",
     initial_sidebar_state="expanded"
 )
-
-# Check if we should render standalone video analyzer "new page"
-analyze_param = st.query_params.get("analyze", None)
-if analyze_param:
-    st.markdown("### Single Video Analyzer")
-    st.markdown(f"**Deep Dive Analysis for:** `{analyze_param}`")
-    if st.button("← Back to Dashboard"):
-        st.query_params.clear()
-        st.rerun()
-        
-    with st.spinner("Scraping video data and fetching comments..."):
-        try:
-            from collectors.youtube import fetch_single_video_data
-            from pipeline.classify import classify_and_score
-            
-            data = fetch_single_video_data(analyze_param, max_comments=30)
-            video_post = data["video"]
-            raw_comments = data["comments"]
-            
-            processed_comments = []
-            for comment in raw_comments:
-                processed_comments.append(classify_and_score(comment))
-                
-            total_comments = len(processed_comments)
-            avg_threat = sum(c.threat_score for c in processed_comments) / total_comments if total_comments > 0 else 0
-            avg_sentiment = sum(c.sentiment_score for c in processed_comments) / total_comments if total_comments > 0 else 0
-            
-            st.success("Analysis Complete!")
-            
-            vcol1, vcol2, vcol3, vcol4 = st.columns(4)
-            with vcol1:
-                st.markdown(f"""
-                <div class="metric-card" style="background-color: #1f2937; border: 1px solid #374151; padding: 20px; border-radius: 10px; text-align: center;">
-                    <div style="font-size: 1.2rem; font-weight: bold; color: #3b82f6; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;" title="{video_post.author_name}">{video_post.author_name}</div>
-                    <div style="font-size: 0.9rem; color: #9ca3af; text-transform: uppercase;">Channel</div>
-                </div>
-                """, unsafe_allow_html=True)
-            with vcol2:
-                st.markdown(f"""
-                <div class="metric-card" style="background-color: #1f2937; border: 1px solid #374151; padding: 20px; border-radius: 10px; text-align: center;">
-                    <div style="font-size: 2.2rem; font-weight: bold; color: #3b82f6;">{video_post.engagement.get('views', 0):,}</div>
-                    <div style="font-size: 0.9rem; color: #9ca3af; text-transform: uppercase;">Views</div>
-                </div>
-                """, unsafe_allow_html=True)
-            with vcol3:
-                st.markdown(f"""
-                <div class="metric-card" style="background-color: #1f2937; border: 1px solid #374151; padding: 20px; border-radius: 10px; text-align: center;">
-                    <div style="font-size: 2.2rem; font-weight: bold; color: {'#ef4444' if avg_threat >= 0.5 else '#10b981'};">{avg_threat:.2f}</div>
-                    <div style="font-size: 0.9rem; color: #9ca3af; text-transform: uppercase;">Avg Comment Threat</div>
-                </div>
-                """, unsafe_allow_html=True)
-            with vcol4:
-                st.markdown(f"""
-                <div class="metric-card" style="background-color: #1f2937; border: 1px solid #374151; padding: 20px; border-radius: 10px; text-align: center;">
-                    <div style="font-size: 2.2rem; font-weight: bold; color: {'#ef4444' if avg_sentiment < 0 else '#10b981'};">{avg_sentiment:.2f}</div>
-                    <div style="font-size: 0.9rem; color: #9ca3af; text-transform: uppercase;">Avg Sentiment</div>
-                </div>
-                """, unsafe_allow_html=True)
-                
-            st.markdown(f"**{video_post.text}**")
-            st.markdown("---")
-            
-            st.markdown(f"#### Analyzed Comments ({total_comments})")
-            for c in sorted(processed_comments, key=lambda x: x.threat_score, reverse=True):
-                badge_color = "#ef4444" if c.threat_score >= 0.8 else ("#f59e0b" if c.threat_score >= 0.5 else "#10b981")
-                badge_text = "CRITICAL" if c.threat_score >= 0.8 else ("HIGH" if c.threat_score >= 0.5 else "LOW")
-                
-                st.markdown(f"""
-                <div style="background-color: #1f2937; padding: 12px; border-radius: 8px; margin-bottom: 10px; border-left: 4px solid {badge_color};">
-                    <div style="display: flex; justify-content: space-between; margin-bottom: 6px;">
-                        <strong>{c.author_name}</strong>
-                        <div style="display: flex; gap: 8px;">
-                            <span style="background-color: {badge_color}; color: white; padding: 2px 8px; border-radius: 4px; font-size: 0.7rem; font-weight: bold;">{badge_text} ({c.threat_score:.2f})</span>
-                            <span style="font-size: 0.8rem; color: #9ca3af;">Sent: {c.sentiment_score:.2f} | Likes: {c.engagement.get('likes', 0)}</span>
-                        </div>
-                    </div>
-                    <div style="color: #e5e7eb; font-size: 0.95rem;">{c.text}</div>
-                </div>
-                """, unsafe_allow_html=True)
-                
-        except Exception as e:
-            st.error(f"Failed to analyze video: {str(e)}")
-            
-    st.stop()
-
-
-# Set page config
-st.set_page_config(
-    page_title="NTK Party Social Media Threat Monitor",
-    page_icon=None,
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
-
-
 
 # Custom Styling (Dark Mode, Solid colors)
 st.markdown("""
@@ -193,6 +102,265 @@ st.markdown("""
     }
 </style>
 """, unsafe_allow_html=True)
+
+def render_single_video_analysis(video_post, processed_comments, is_standalone=False):
+    """
+    Renders the Single Video Analyzer dashboard view, complete with 8 metric cards,
+    dedicated Markdown / CSV exporter, AI Threat Assessment summary, action steps,
+    and a searchable/sortable analyzed comments feed.
+    """
+    metrics = compute_single_video_metrics(video_post, processed_comments)
+    report_markdown = generate_single_video_markdown_report(video_post, processed_comments)
+    ai_summary = generate_single_video_ai_summary(metrics, processed_comments)
+    action_steps = generate_single_video_action_steps(metrics, processed_comments)
+    
+    st.markdown("---")
+    
+    # Video Title & Header Card
+    st.markdown(f"### 📹 {metrics['video_title']}")
+    st.markdown(f"**Channel**: `{metrics['channel_name']}` &nbsp;|&nbsp; **URL**: [{metrics['video_url']}]({metrics['video_url']}) &nbsp;|&nbsp; **Video ID**: `{metrics['video_id']}`")
+    
+    # 8-Card Quantitative Metric Grid
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        st.markdown(f"""
+        <div class="metric-card" style="background-color: #1f2937; border: 1px solid #374151; padding: 18px; border-radius: 10px; text-align: center;">
+            <div style="font-size: 1.8rem; font-weight: bold; color: #3b82f6;">{metrics['video_views']:,}</div>
+            <div style="font-size: 0.85rem; color: #9ca3af; text-transform: uppercase;">Video Views</div>
+        </div>
+        """, unsafe_allow_html=True)
+    with c2:
+        likes_display = f"{metrics['video_likes']:,}" if metrics['video_likes'] > 0 else "N/A"
+        st.markdown(f"""
+        <div class="metric-card" style="background-color: #1f2937; border: 1px solid #374151; padding: 18px; border-radius: 10px; text-align: center;">
+            <div style="font-size: 1.8rem; font-weight: bold; color: #3b82f6;">{likes_display}</div>
+            <div style="font-size: 0.85rem; color: #9ca3af; text-transform: uppercase;">Video Likes</div>
+        </div>
+        """, unsafe_allow_html=True)
+    with c3:
+        st.markdown(f"""
+        <div class="metric-card" style="background-color: #1f2937; border: 1px solid #374151; padding: 18px; border-radius: 10px; text-align: center;">
+            <div style="font-size: 1.8rem; font-weight: bold; color: #10b981;">{metrics['total_comments']}</div>
+            <div style="font-size: 0.85rem; color: #9ca3af; text-transform: uppercase;">Comments Sampled</div>
+        </div>
+        """, unsafe_allow_html=True)
+    with c4:
+        st.markdown(f"""
+        <div class="metric-card" style="background-color: #1f2937; border: 1px solid #374151; padding: 18px; border-radius: 10px; text-align: center;">
+            <div style="font-size: 1.8rem; font-weight: bold; color: #ec4899;">{metrics['total_comment_likes']:,}</div>
+            <div style="font-size: 0.85rem; color: #9ca3af; text-transform: uppercase;">Total Comment Likes</div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    c5, c6, c7, c8 = st.columns(4)
+    with c5:
+        st.markdown(f"""
+        <div class="metric-card" style="background-color: #1f2937; border: 1px solid #374151; padding: 18px; border-radius: 10px; text-align: center;">
+            <div style="font-size: 1.8rem; font-weight: bold; color: {metrics['threat_color']};">{metrics['avg_threat']:.2f} <span style="font-size: 0.85rem;">({metrics['overall_threat_level']})</span></div>
+            <div style="font-size: 0.85rem; color: #9ca3af; text-transform: uppercase;">Avg Threat Index</div>
+        </div>
+        """, unsafe_allow_html=True)
+    with c6:
+        sent_color = '#ef4444' if metrics['avg_sentiment'] < -0.15 else ('#10b981' if metrics['avg_sentiment'] > 0.15 else '#9ca3af')
+        st.markdown(f"""
+        <div class="metric-card" style="background-color: #1f2937; border: 1px solid #374151; padding: 18px; border-radius: 10px; text-align: center;">
+            <div style="font-size: 1.8rem; font-weight: bold; color: {sent_color};">{metrics['avg_sentiment']:.2f}</div>
+            <div style="font-size: 0.85rem; color: #9ca3af; text-transform: uppercase;">Avg Sentiment</div>
+        </div>
+        """, unsafe_allow_html=True)
+    with c7:
+        flagged_total = metrics['critical_count'] + metrics['high_count']
+        st.markdown(f"""
+        <div class="metric-card" style="background-color: #1f2937; border: 1px solid #374151; padding: 18px; border-radius: 10px; text-align: center;">
+            <div style="font-size: 1.8rem; font-weight: bold; color: {'#ef4444' if flagged_total > 0 else '#10b981'};">{flagged_total}</div>
+            <div style="font-size: 0.85rem; color: #9ca3af; text-transform: uppercase;">Critical / High Alerts</div>
+        </div>
+        """, unsafe_allow_html=True)
+    with c8:
+        st.markdown(f"""
+        <div class="metric-card" style="background-color: #1f2937; border: 1px solid #374151; padding: 18px; border-radius: 10px; text-align: center;">
+            <div style="font-size: 1.8rem; font-weight: bold; color: #8b5cf6;">{metrics['max_comment_likes']:,}</div>
+            <div style="font-size: 0.85rem; color: #9ca3af; text-transform: uppercase;">Max Comment Likes</div>
+        </div>
+        """, unsafe_allow_html=True)
+        
+    st.markdown("---")
+    
+    # 📥 DEDICATED MARKDOWN & DATA EXPORTER SECTION
+    st.markdown("### 📥 Single Video Threat Intelligence Exporter")
+    st.markdown("Download an intelligence assessment dossier (Markdown) containing all quantitative metrics, AI narrative synthesis, high-risk flagged comments, and strategic next steps.")
+    
+    exp_col1, exp_col2 = st.columns([1, 1])
+    filename_ts = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
+    with exp_col1:
+        st.markdown("#### Export Assessment Dossier")
+        st.download_button(
+            label="📄 Download Video Intelligence Report (Markdown)",
+            data=report_markdown,
+            file_name=f"single_video_threat_report_{metrics['video_id']}_{filename_ts}.md",
+            mime="text/markdown",
+            use_container_width=True
+        )
+        
+        # CSV Export for comments
+        comm_records = []
+        for c in processed_comments:
+            comm_records.append({
+                "author": c.author_name,
+                "text": c.text,
+                "threat_score": c.threat_score,
+                "threat_label": c.threat_label,
+                "sentiment_score": c.sentiment_score,
+                "likes": c.engagement.get("likes", 0),
+                "url": c.url,
+                "published_at": c.published_at.strftime("%Y-%m-%d %H:%M:%S") if c.published_at else ""
+            })
+        if comm_records:
+            comm_df = pd.DataFrame(comm_records)
+            st.download_button(
+                label="📊 Export Analyzed Comments (CSV)",
+                data=comm_df.to_csv(index=False).encode('utf-8'),
+                file_name=f"single_video_comments_{metrics['video_id']}_{filename_ts}.csv",
+                mime="text/csv",
+                use_container_width=True
+            )
+            
+    with exp_col2:
+        st.markdown("#### Assessment Dossier Highlights")
+        st.markdown(f"""
+        <div style="background-color: #111827; border: 1px solid #374151; padding: 14px 18px; border-radius: 8px;">
+            <div style="color: #9ca3af; font-size: 0.8rem; text-transform: uppercase; font-weight: 600; margin-bottom: 6px;">Report Dossier Contents</div>
+            <div style="color: #e5e7eb; font-size: 0.9rem; line-height: 1.6;">
+                • <strong>Overall Verdict</strong>: <span style="color: {metrics['threat_color']}; font-weight: bold;">{metrics['overall_threat_level']} Threat Index ({metrics['avg_threat']:.2f})</span><br/>
+                • <strong>Public Sentiment</strong>: {metrics['sentiment_verdict']} ({metrics['avg_sentiment']:.2f})<br/>
+                • <strong>Total Audience Engagement</strong>: {metrics['total_comment_likes']:,} likes across {metrics['total_comments']} comments<br/>
+                • <strong>Includes</strong>: Full AI narrative analysis, detailed flagged comment quotes & links, and a 5-point strategic response plan.
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+        
+    with st.expander("📄 View Live Markdown Report Content Preview", expanded=False):
+        st.text_area("Live Markdown Report Preview", value=report_markdown, height=350, disabled=True)
+        
+    st.markdown("---")
+    
+    # 🤖 AI SYNTHESIS & 🎯 STEPS TO BE TAKEN
+    col_ai, col_steps = st.columns(2)
+    with col_ai:
+        st.markdown("### 🤖 AI Threat & Sentiment Intelligence Assessment")
+        st.markdown(f"""
+        <div style="background-color: #1f2937; border: 1px solid #374151; border-left: 4px solid {metrics['threat_color']}; padding: 18px; border-radius: 8px; line-height: 1.6; color: #e5e7eb; font-size: 0.95rem;">
+            {ai_summary.replace(chr(10)+chr(10), '<br/><br/>')}
+        </div>
+        """, unsafe_allow_html=True)
+        
+    with col_steps:
+        st.markdown("### 🎯 Recommended Strategic & Tactical Steps")
+        for step in action_steps:
+            p_color = "#ef4444" if step["priority"] == "HIGH" else ("#f59e0b" if step["priority"] == "MEDIUM" else "#10b981")
+            st.markdown(f"""
+            <div style="background-color: #1f2937; border: 1px solid #374151; border-left: 4px solid {p_color}; padding: 12px 16px; border-radius: 8px; margin-bottom: 10px;">
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
+                    <strong style="color: #f3f4f6; font-size: 0.95rem;">{step['phase']}</strong>
+                    <span style="background-color: {p_color}22; color: {p_color}; border: 1px solid {p_color}; padding: 2px 8px; border-radius: 4px; font-size: 0.7rem; font-weight: bold;">{step['priority']} PRIORITY</span>
+                </div>
+                <div style="color: #d1d5db; font-size: 0.88rem; line-height: 1.4;">{step['action']}</div>
+            </div>
+            """, unsafe_allow_html=True)
+            
+    st.markdown("---")
+    
+    # 💬 ANALYZED COMMENTS FEED
+    st.markdown(f"### 💬 Analyzed Video Comments ({metrics['total_comments']})")
+    
+    fcol1, fcol2 = st.columns([2, 2])
+    with fcol1:
+        filter_opt = st.selectbox(
+            "Filter Comments Feed",
+            ["All Analyzed Comments", "Critical Threats (≥ 0.80)", "High & Critical Threats (≥ 0.50)", "Negative Sentiment (< -0.15)", "Positive Mentions (> +0.15)"],
+            key=f"sv_filter_{metrics['video_id']}_{'standalone' if is_standalone else 'tab'}"
+        )
+    with fcol2:
+        sort_opt = st.selectbox(
+            "Sort Order",
+            ["Highest Threat Score First", "Most Liked Comments First", "Most Negative Sentiment First"],
+            key=f"sv_sort_{metrics['video_id']}_{'standalone' if is_standalone else 'tab'}"
+        )
+        
+    filtered_list = list(processed_comments)
+    if filter_opt == "Critical Threats (≥ 0.80)":
+        filtered_list = [c for c in filtered_list if (c.threat_score or 0.0) >= 0.80]
+    elif filter_opt == "High & Critical Threats (≥ 0.50)":
+        filtered_list = [c for c in filtered_list if (c.threat_score or 0.0) >= 0.50]
+    elif filter_opt == "Negative Sentiment (< -0.15)":
+        filtered_list = [c for c in filtered_list if (c.sentiment_score or 0.0) < -0.15]
+    elif filter_opt == "Positive Mentions (> +0.15)":
+        filtered_list = [c for c in filtered_list if (c.sentiment_score or 0.0) > 0.15]
+        
+    if sort_opt == "Highest Threat Score First":
+        filtered_list.sort(key=lambda x: x.threat_score or 0.0, reverse=True)
+    elif sort_opt == "Most Liked Comments First":
+        filtered_list.sort(key=lambda x: x.engagement.get("likes", 0), reverse=True)
+    elif sort_opt == "Most Negative Sentiment First":
+        filtered_list.sort(key=lambda x: x.sentiment_score or 0.0)
+        
+    if not filtered_list:
+        st.info("No comments match the selected filter criteria.")
+    else:
+        for c in filtered_list:
+            badge_color = "#ef4444" if (c.threat_score or 0.0) >= 0.8 else ("#f59e0b" if (c.threat_score or 0.0) >= 0.5 else "#10b981")
+            badge_text = "CRITICAL" if (c.threat_score or 0.0) >= 0.8 else ("HIGH" if (c.threat_score or 0.0) >= 0.5 else "LOW")
+            lbl_text = (c.threat_label or "neutral_mention").replace("_", " ").upper()
+            
+            st.markdown(f"""
+            <div style="background-color: #1f2937; padding: 14px; border-radius: 8px; margin-bottom: 12px; border-left: 4px solid {badge_color};">
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
+                    <div style="display: flex; align-items: center; gap: 8px;">
+                        <strong style="color: #f3f4f6;">{c.author_name}</strong>
+                        <span style="background-color: #374151; color: #9ca3af; padding: 1px 6px; border-radius: 4px; font-size: 0.75rem;">{lbl_text}</span>
+                    </div>
+                    <div style="display: flex; gap: 8px; align-items: center;">
+                        <span style="background-color: {badge_color}; color: white; padding: 2px 8px; border-radius: 4px; font-size: 0.72rem; font-weight: bold;">{badge_text} ({c.threat_score:.2f})</span>
+                        <span style="font-size: 0.8rem; color: #9ca3af;">Sent: <strong>{c.sentiment_score:.2f}</strong></span>
+                        <span style="font-size: 0.8rem; color: #ec4899;">❤️ <strong>{c.engagement.get('likes', 0):,}</strong></span>
+                    </div>
+                </div>
+                <div style="color: #e5e7eb; font-size: 0.95rem; line-height: 1.4; margin-top: 4px;">{c.text}</div>
+                <div style="margin-top: 8px; text-align: right;">
+                    <a href="{c.url}" target="_blank" style="color: #60a5fa; font-size: 0.78rem; text-decoration: none;">View on YouTube ↗</a>
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+
+
+# Check if we should render standalone video analyzer "new page"
+analyze_param = st.query_params.get("analyze", None)
+if analyze_param:
+    st.markdown("### 🎯 Single Video Threat & Sentiment Deep Dive")
+    st.markdown(f"**Target URL:** `{analyze_param}`")
+    if st.button("← Back to Dashboard"):
+        st.query_params.clear()
+        st.rerun()
+        
+    with st.spinner("Scraping video data and fetching audience comments..."):
+        try:
+            from collectors.youtube import fetch_single_video_data
+            from pipeline.classify import classify_and_score
+            
+            data = fetch_single_video_data(analyze_param, max_comments=40)
+            video_post = data["video"]
+            raw_comments = data["comments"]
+            
+            processed_comments = []
+            for comment in raw_comments:
+                processed_comments.append(classify_and_score(comment))
+                
+            render_single_video_analysis(video_post, processed_comments, is_standalone=True)
+                
+        except Exception as e:
+            st.error(f"Failed to analyze video: {str(e)}")
+            
+    st.stop()
 
 # Helper function to load data from database
 def load_data():
@@ -1361,13 +1529,48 @@ if not df.empty:
         st.text_area("Live Report Content Preview", value=report_text, height=400, disabled=True)
 
     with tab_single_video:
-        st.markdown("### Single Video Analyzer")
-        st.markdown("Analyze comments, views, and threat levels for a specific YouTube video without relying on API quotas. (Uses scraping & actual comments).")
+        st.markdown("### 🎯 Single Video Threat & Sentiment Analyzer")
+        st.markdown("Analyze audience comments, viewer sentiment, threat levels, and engagement metrics for a specific YouTube video without relying on API quotas. Includes comprehensive Markdown report export, AI summary synthesis, and actionable steps.")
         
-        sv_url = st.text_input("YouTube Video URL", placeholder="e.g. https://www.youtube.com/watch?v=dQw4w9WgXcQ")
-        
-        if sv_url:
-            st.markdown(f'<a href="?analyze={urllib.parse.quote(sv_url)}" target="_blank" style="display: inline-block; color: #ffffff; background-color: #3b82f6; text-decoration: none; font-weight: bold; font-size: 1rem; border: 1px solid #3b82f6; padding: 10px 20px; border-radius: 6px; transition: background 0.2s;">Analyze Video in New Tab</a>', unsafe_allow_html=True)
+        sv_col_in, sv_col_slider = st.columns([3, 1])
+        with sv_col_in:
+            sv_url = st.text_input("YouTube Video URL", placeholder="e.g. https://www.youtube.com/watch?v=dQw4w9WgXcQ", key="tab_sv_url_input")
+        with sv_col_slider:
+            sv_sample_size = st.slider("Comments Sample Limit", min_value=10, max_value=100, value=30, step=10, key="tab_sv_sample_size")
+            
+        sv_btn_col1, sv_btn_col2 = st.columns([1, 1])
+        with sv_btn_col1:
+            run_in_page = st.button("🔍 Run Deep Dive Analysis (In-Page)", use_container_width=True, type="primary")
+        with sv_btn_col2:
+            if sv_url:
+                st.markdown(f'<a href="?analyze={urllib.parse.quote(sv_url)}" target="_blank" style="display: block; text-align: center; color: #ffffff; background-color: #374151; text-decoration: none; font-weight: bold; font-size: 0.95rem; border: 1px solid #4b5563; padding: 8px 16px; border-radius: 6px; transition: background 0.2s;">Open in Standalone Tab ↗</a>', unsafe_allow_html=True)
+            else:
+                st.button("Open in Standalone Tab ↗", disabled=True, use_container_width=True)
+                
+        if run_in_page and sv_url:
+            with st.spinner("Scraping video metadata and downloading real-time comments..."):
+                try:
+                    from collectors.youtube import fetch_single_video_data
+                    from pipeline.classify import classify_and_score
+                    
+                    data = fetch_single_video_data(sv_url, max_comments=sv_sample_size)
+                    video_post = data["video"]
+                    raw_comments = data["comments"]
+                    
+                    processed_comments = []
+                    for comment in raw_comments:
+                        processed_comments.append(classify_and_score(comment))
+                        
+                    st.session_state["tab_single_video_data"] = {
+                        "video_post": video_post,
+                        "processed_comments": processed_comments
+                    }
+                except Exception as e:
+                    st.error(f"Failed to analyze video: {str(e)}")
+                    
+        if "tab_single_video_data" in st.session_state and st.session_state["tab_single_video_data"]:
+            sv_cached = st.session_state["tab_single_video_data"]
+            render_single_video_analysis(sv_cached["video_post"], sv_cached["processed_comments"], is_standalone=False)
             
 else:
     st.info("The database is currently empty. Please trigger 'Run Ingestion Now' in the sidebar to load simulated threat alerts and verify the dashboard visualizer.")

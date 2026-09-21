@@ -30,6 +30,8 @@ MAX_DAILY_QUOTA = 9500
 SEARCH_COST = 100
 COMMENT_THREAD_COST = 1
 
+MAX_POST_AGE_DAYS = int(os.getenv("MAX_POST_AGE_DAYS", "3"))
+
 def get_today_quota_key() -> str:
     today_str = datetime.date.today().isoformat()
     return f"quota:youtube:{today_str}"
@@ -67,41 +69,51 @@ def parse_relative_time(time_str: str) -> datetime.datetime:
     if not time_str:
         return old_epoch
         
-    time_str = time_str.lower().strip()
-    
-    # Handle live streams or active/premiering videos
-    if "live" in time_str or "watching" in time_str:
-        return datetime.datetime.now(datetime.timezone.utc)
-        
-    # Handle yesterday
-    if "yesterday" in time_str:
-        return datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=1)
-        
-    # Try parsing patterns like "2 hours ago", "1 day ago", "3 months ago", etc.
-    match = re.search(r"(\d+)\s+(second|minute|hour|day|week|month|year)s?\s+ago", time_str)
-    if not match:
-        return datetime.datetime.now(datetime.timezone.utc)
-        
-    amount = int(match.group(1))
-    unit = match.group(2)
-    
+    cleaned = re.sub(r"\s+", " ", time_str.lower().replace("\xa0", " ").strip())
     now = datetime.datetime.now(datetime.timezone.utc)
-    if "second" in unit:
-        return now - datetime.timedelta(seconds=amount)
-    elif "minute" in unit:
-        return now - datetime.timedelta(minutes=amount)
-    elif "hour" in unit:
-        return now - datetime.timedelta(hours=amount)
-    elif "day" in unit:
-        return now - datetime.timedelta(days=amount)
-    elif "week" in unit:
-        return now - datetime.timedelta(weeks=amount)
-    elif "month" in unit:
-        # Approximate month as 30 days
-        return now - datetime.timedelta(days=amount * 30)
-    elif "year" in unit:
-        return now - datetime.timedelta(days=amount * 365)
+    
+    # 1. Handle active live streams ONLY (must not be a past streamed event like "Streamed 2 days ago")
+    if ("watching" in cleaned or cleaned in ("live", "live now")) and "ago" not in cleaned and "streamed" not in cleaned:
+        return now
         
+    # 2. Handle yesterday
+    if "yesterday" in cleaned:
+        return now - datetime.timedelta(days=1)
+        
+    # 3. Match relative times with "ago" (e.g. "2 years ago", "4d ago", "7h ago", "31 min ago", "1mo ago", "Streamed 2y ago")
+    match = re.search(
+        r"(\d+)\s*(seconds?|sec|s|minutes?|mins?|m|hours?|hrs?|h|days?|d|weeks?|wks?|w|months?|mos?|mo|years?|yrs?|y)\s+ago",
+        cleaned
+    )
+    if match:
+        amount = int(match.group(1))
+        unit = match.group(2)
+        
+        if unit in ("s", "sec", "second", "seconds"):
+            return now - datetime.timedelta(seconds=amount)
+        elif unit in ("m", "min", "mins", "minute", "minutes"):
+            return now - datetime.timedelta(minutes=amount)
+        elif unit in ("h", "hr", "hrs", "hour", "hours"):
+            return now - datetime.timedelta(hours=amount)
+        elif unit in ("d", "day", "days"):
+            return now - datetime.timedelta(days=amount)
+        elif unit in ("w", "wk", "wks", "week", "weeks"):
+            return now - datetime.timedelta(weeks=amount)
+        elif unit in ("mo", "mos", "month", "months"):
+            return now - datetime.timedelta(days=amount * 30)
+        elif unit in ("y", "yr", "yrs", "year", "years"):
+            return now - datetime.timedelta(days=amount * 365)
+
+    # 4. Handle absolute date strings like "Premiered Apr 1, 2024", "Streamed live on Jan 15, 2023", "May 5, 2024"
+    date_clean = re.sub(r"^(premiered|streamed live on|streamed on|uploaded on)\s+", "", cleaned)
+    for fmt in ("%b %d, %Y", "%B %d, %Y", "%d %b %Y", "%d %B %Y", "%Y-%m-%d", "%b %d %Y"):
+        try:
+            dt = datetime.datetime.strptime(date_clean.strip(), fmt)
+            return dt.replace(tzinfo=datetime.timezone.utc)
+        except ValueError:
+            pass
+
+    # Safe fallback: Defaulting to old_epoch guarantees old/unparseable videos never bypass the search window
     return old_epoch
 
 from concurrent.futures import ThreadPoolExecutor
@@ -115,6 +127,9 @@ def fetch_chunk(chunk: List[str], headers: dict) -> List[Post]:
     encoded_kw = urllib.parse.quote(kw_query)
     # sp=CAI%3D sorts by upload date, hl=en forces English language results
     url = f"https://www.youtube.com/results?search_query={encoded_kw}&sp=CAI%3D&hl=en"
+    
+    max_age_days = int(os.getenv("MAX_POST_AGE_DAYS", "3"))
+    cutoff_date = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=max_age_days)
     
     try:
         print(f"[YouTube Collector] Scraping public search page for batch query: {kw_query}")
@@ -164,9 +179,23 @@ def fetch_chunk(chunk: List[str], headers: dict) -> List[Post]:
                 except ValueError:
                     pass
                     
-                # Extract relative time string and parse
-                time_text = renderer.get("publishedTimeText", {}).get("simpleText", "")
-                published_at = parse_relative_time(time_text)
+                # Extract relative time string safely from simpleText or runs
+                pub_obj = renderer.get("publishedTimeText", {})
+                time_text = pub_obj.get("simpleText", "")
+                if not time_text:
+                    runs = pub_obj.get("runs", [])
+                    if runs:
+                        time_text = runs[0].get("text", "")
+                        
+                badges = [b.get("metadataBadgeRenderer", {}).get("label", "") for b in renderer.get("badges", [])]
+                if "LIVE" in badges and not time_text:
+                    published_at = datetime.datetime.now(datetime.timezone.utc)
+                else:
+                    published_at = parse_relative_time(time_text)
+                    
+                # Enforce sliding search window: Skip videos older than MAX_POST_AGE_DAYS
+                if published_at < cutoff_date:
+                    continue
                     
                 post = Post(
                     post_id=f"yt_vid_{video_id}",
@@ -220,7 +249,18 @@ def scrape_youtube_public(custom_keywords: List[str] = None) -> List[Post]:
         for res in results:
             posts.extend(res)
             
-    return posts
+    # Final filter pass to ensure every single post strictly satisfies the search window
+    max_age_days = int(os.getenv("MAX_POST_AGE_DAYS", "3"))
+    cutoff = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=max_age_days)
+    filtered_posts = []
+    for p in posts:
+        pub = p.published_at
+        if pub.tzinfo is None:
+            pub = pub.replace(tzinfo=datetime.timezone.utc)
+        if pub >= cutoff:
+            filtered_posts.append(p)
+            
+    return filtered_posts
 
 def fetch_youtube_threats(custom_keywords: List[str] = None) -> List[Post]:
     print("[YouTube Collector] Starting YouTube Threat Scans...")
@@ -246,18 +286,24 @@ def fetch_youtube_threats(custom_keywords: List[str] = None) -> List[Post]:
     try:
         youtube = build('youtube', 'v3', developerKey=YOUTUBE_API_KEY)
         posts = []
+        
+        max_age_days = int(os.getenv("MAX_POST_AGE_DAYS", "3"))
+        cutoff_date = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=max_age_days)
+        published_after_rfc3339 = cutoff_date.strftime("%Y-%m-%dT%H:%M:%SZ")
 
         for kw in target_kws:
             kw = kw.strip()
             if not is_quota_available(SEARCH_COST):
                 break
             
-            # 1. Search videos
+            # 1. Search videos with upload date ordering and publishedAfter filter
             search_response = youtube.search().list(
                 q=kw,
                 part="id,snippet",
-                maxResults=5,
-                type="video"
+                maxResults=10,
+                type="video",
+                order="date",
+                publishedAfter=published_after_rfc3339
             ).execute()
             increment_quota(SEARCH_COST)
 
@@ -268,6 +314,10 @@ def fetch_youtube_threats(custom_keywords: List[str] = None) -> List[Post]:
                 channel_id = item["snippet"]["channelId"]
                 published_at_str = item["snippet"]["publishedAt"]
                 published_at = datetime.datetime.fromisoformat(published_at_str.replace("Z", "+00:00"))
+                
+                # Skip any video published earlier than the cutoff window
+                if published_at < cutoff_date:
+                    continue
 
                 # Create Post object for the video description/title
                 video_post = Post(
@@ -411,6 +461,24 @@ def fetch_single_video_data(video_url: str, max_comments: int = 50) -> Dict[str,
                             owner_runs = owner.get("title", {}).get("runs", [])
                             if owner_runs: channel_name = owner_runs[0].get("text", channel_name)
                     
+                    # Extract likes if present
+                    likes = 0
+                    like_match = re.search(r'"label":\s*"([0-9,KMkm\.]+)\s+likes?"', response.text, re.IGNORECASE)
+                    if not like_match:
+                        like_match = re.search(r'([0-9,KMkm\.]+)\s+likes', response.text, re.IGNORECASE)
+                    if like_match:
+                        raw_likes = like_match.group(1).replace(",", "").strip().lower()
+                        try:
+                            if "k" in raw_likes:
+                                likes = int(float(raw_likes.replace("k", "")) * 1000)
+                            elif "m" in raw_likes:
+                                likes = int(float(raw_likes.replace("m", "")) * 1000000)
+                            else:
+                                digits = re.sub(r"\D", "", raw_likes)
+                                if digits: likes = int(digits)
+                        except Exception:
+                            likes = 0
+
                     video_post = Post(
                         post_id=f"yt_vid_{video_id}",
                         platform="youtube",
@@ -419,7 +487,7 @@ def fetch_single_video_data(video_url: str, max_comments: int = 50) -> Dict[str,
                         author_name=channel_name,
                         published_at=datetime.datetime.now(datetime.timezone.utc),
                         url=url,
-                        engagement={"views": views},
+                        engagement={"views": views, "likes": likes},
                         raw_json=None
                     )
     except Exception as e:
@@ -434,7 +502,7 @@ def fetch_single_video_data(video_url: str, max_comments: int = 50) -> Dict[str,
             author_name="Unknown Channel",
             published_at=datetime.datetime.now(datetime.timezone.utc),
             url=url,
-            engagement={"views": 0},
+            engagement={"views": 0, "likes": 0},
             raw_json=None
         )
         

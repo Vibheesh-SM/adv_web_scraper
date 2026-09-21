@@ -19,4 +19,4 @@ pyvis>=0.3.0
 networkx>=3.0
 celery>=5.2.7
 streamlit-autorefresh>=0.0.1
-youtube-comment-downloader>=0.2.7
+youtube-comment-downloader>=0.1.83
